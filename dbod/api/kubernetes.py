@@ -160,7 +160,7 @@ class KubernetesClusters(tornado.web.RequestHandler):
         :request body:
             - app_type(str) - the type of the application (at the moment *mysql* and *postgres* are supported)
             - app_name(str) - the name of the application instance
-            - vol_type(str) - the storage system that will be used (at the moment *cinder* and *nfs* are supported)
+            - vol_type(str) - the storage system that will be used (at the moment *emptyDir* (default), *cinder* and *nfs* are supported)
 
         In case of *vol_type=nfs* the following parameters have to be given as well:
 
@@ -201,10 +201,13 @@ class KubernetesClusters(tornado.web.RequestHandler):
         instance_name = self.get_argument('app_name', None)
         volume_type = self.get_argument('vol_type', None)
 
+        if not volume_type:
+          volume_type = 'emptyDir'
+
         # if there are no the right params present,
         # it will try to load a json from request body
         if ((app_type == 'mysql' or app_type == 'postgres') and
-            (volume_type == 'cinder' or volume_type == 'nfs') and
+            (volume_type == 'cinder' or volume_type == 'nfs' or volume_type == 'emptyDir') and
             instance_name):
             if volume_type == 'nfs':
                 # status code 400 if type is nfs and server and path is not defined
@@ -689,7 +692,7 @@ class KubernetesClusters(tornado.web.RequestHandler):
         secrets_args = self.get_resource_args(cluster_name, 'secrets', False)
         secret_url, cert, key, ca = self._config(secrets_args)
         volume_project_url = volume_url + '/' + project_id + '/volumes'
-        
+
         exists_cnf = self.check_ifexists(instance_name+'-secret-' + app_type + '.cnf',
                                          secret_url, cert=cert, key=key, ca=ca)
         exists_init = self.check_ifexists(instance_name+'-secret-init.sql',
@@ -742,7 +745,7 @@ class KubernetesClusters(tornado.web.RequestHandler):
                               exists_init)
                            )
 
-        if volume_type == 'nfs':
+        if volume_type == 'nfs' or volume_type == 'emptyDir':
             return None, None
 
         # Continue if volume_type is cinder
@@ -750,7 +753,7 @@ class KubernetesClusters(tornado.web.RequestHandler):
         data, _ = get_function(volume_project_url, headers=self.headers)
         exist_volume = [instance_name+'-vol-data' in vol['name'] or instance_name+'-vol-bin' in vol['name']
                         for vol in data['volumes']]
-        
+
 
         # if there are no volumes with the same name
         if exist_volume.count(True) == 0:
@@ -879,6 +882,15 @@ class KubernetesClusters(tornado.web.RequestHandler):
                     'volume_attr': 'fsType',
                     'volume_attr_data': 'ext4',
                     'volume_attr_bin': 'ext4'
+                   }
+        elif volume_type == 'emptyDir':
+            return {'volume_type': volume_type,
+                    'volume_ident': None,
+                    'volume_ident_data': None,
+                    'volume_ident_bin': None,
+                    'volume_attr': None,
+                    'volume_attr_data': None,
+                    'volume_attr_bin': None
                    }
 
     def postjson(self, composed_url, getBackfield, response_name,  **args):
