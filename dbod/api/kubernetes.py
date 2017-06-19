@@ -95,6 +95,13 @@ class KubernetesClusters(tornado.web.RequestHandler):
                 'conf_name': 'postgresql.conf',
                 'init_name': 'init.sh',
                 'port': 6600
+                },
+            'elasticsearch': {
+                'conf_name': 'elasticsearch.yaml',
+                'init_name': None,
+                'port': 9200
+                },
+            'kibana': {
                 }
             }
 
@@ -158,7 +165,7 @@ class KubernetesClusters(tornado.web.RequestHandler):
         :type subname: str
 
         :request body:
-            - app_type(str) - the type of the application (at the moment *mysql* and *postgres* are supported)
+            - app_type(str) - the type of the application (at the moment *mysql*, *postgres*, *elasticsearch* and *kibana* are supported)
             - app_name(str) - the name of the application instance
             - vol_type(str) - the storage system that will be used (at the moment *emptyDir* (default), *cinder* and *nfs* are supported)
 
@@ -206,7 +213,7 @@ class KubernetesClusters(tornado.web.RequestHandler):
 
         # if there are no the right params present,
         # it will try to load a json from request body
-        if ((app_type == 'mysql' or app_type == 'postgres') and
+        if ((app_type in self.app_specifics.keys()) and
             (volume_type == 'cinder' or volume_type == 'nfs' or volume_type == 'emptyDir') and
             instance_name):
             if volume_type == 'nfs':
@@ -695,8 +702,11 @@ class KubernetesClusters(tornado.web.RequestHandler):
 
         exists_cnf = self.check_ifexists(instance_name+'-secret-' + app_type + '.cnf',
                                          secret_url, cert=cert, key=key, ca=ca)
-        exists_init = self.check_ifexists(instance_name+'-secret-init.sql',
-                                          secret_url, cert=cert, key=key, ca=ca)
+        if init_name:
+            exists_init = self.check_ifexists(instance_name+'-secret-init.sql',
+                                              secret_url, cert=cert, key=key, ca=ca)
+        else:
+            exists_init = 'Nothing'
 
         if not exists_cnf and not exists_init:
             # Secrets
@@ -720,23 +730,24 @@ class KubernetesClusters(tornado.web.RequestHandler):
                           ca=ca)
             logging.debug("%s conf file for secret volume has been created" %(kube_filename))
 
-            secret64 = ''
-            with open(init_file) as conf:
-                secret64 = b64encode(conf.read())
-            configuration = {'secret64': secret64,
-                             'filename': init_name,
-                             'instance_name': instance_name
-                            }
-            kube_filename = app_conf_dir + '/' + 'secretinit.json'
-            secretconf = templates.get_template(conf_template).render(configuration)
-            self.template_write(secretconf, kube_filename)
-            _ = self.postjson(secret_url, ('metadata', 'selfLink'), 'Secretinit',
-                              filename=kube_filename,
-                              cert=cert,
-                              key=key,
-                              ca=ca)
-            logging.debug("%s conf file for secret volume has been created" %(kube_filename))
-            secret64 = ''
+            if exists_init != 'Nothing':
+                secret64 = ''
+                with open(init_file) as conf:
+                    secret64 = b64encode(conf.read())
+                configuration = {'secret64': secret64,
+                                 'filename': init_name,
+                                 'instance_name': instance_name
+                                }
+                kube_filename = app_conf_dir + '/' + 'secretinit.json'
+                secretconf = templates.get_template(conf_template).render(configuration)
+                self.template_write(secretconf, kube_filename)
+                _ = self.postjson(secret_url, ('metadata', 'selfLink'), 'Secretinit',
+                                  filename=kube_filename,
+                                  cert=cert,
+                                  key=key,
+                                  ca=ca)
+                logging.debug("%s conf file for secret volume has been created" %(kube_filename))
+                secret64 = ''
         else:
             logging.warning("Secret volume %s exists: %s and %s exists: %s"
                             %(instance_name+'-secret-' + app_type + '.cnf',
