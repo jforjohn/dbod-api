@@ -82,28 +82,10 @@ class KubernetesClusters(tornado.web.RequestHandler):
 
     headers = {'Content-Type': 'application/json'}
     cloud = config.get('containers-provider', 'cloud')
+    apps = config.get('containers-provider', 'apps').split(',')
     coe = config.get(cloud, 'coe')
     kubeApi = ''
     api_response = {'response': []}
-    app_specifics = {
-            'mysql': {
-                'conf_name': 'mysql.cnf',
-                'init_name': 'init.sql',
-                'port': 5500
-                },
-            'postgres': {
-                'conf_name': 'postgresql.conf',
-                'init_name': 'init.sh',
-                'port': 6600
-                },
-            'elasticsearch': {
-                'conf_name': 'elasticsearch.yaml',
-                'init_name': None,
-                'port': 9200
-                },
-            'kibana': {
-                }
-            }
 
     @cloud_auth(coe)
     def get(self, **args):
@@ -208,14 +190,21 @@ class KubernetesClusters(tornado.web.RequestHandler):
         instance_name = self.get_argument('app_name', None)
         volume_type = self.get_argument('vol_type', None)
 
+        env_params = config.get(app_type, 'env_params').split(',')
+        env_config=[]
+        for param in env_params:
+            value = self.get_argument(env_params, None)
+            env_config.append((param, value))
+
         if not volume_type:
-          volume_type = 'emptyDir'
+            volume_type = 'emptyDir'
 
         # if there are no the right params present,
         # it will try to load a json from request body
-        if ((app_type in self.app_specifics.keys()) and
-            (volume_type == 'cinder' or volume_type == 'nfs' or volume_type == 'emptyDir') and
-            instance_name):
+        if ((app_type in self.apps) and
+           (volume_type == 'cinder' or volume_type == 'nfs' or
+            volume_type == 'emptyDir') and
+           instance_name):
             if volume_type == 'nfs':
                 # status code 400 if type is nfs and server and path is not defined
                 if (not self.get_argument('server_data',None) and
@@ -232,7 +221,11 @@ class KubernetesClusters(tornado.web.RequestHandler):
                     %(app_type, instance_name, volume_type))
 
             # here it gets the path to the kubernetes configuration files for the specific instance
-            depl, svc = self.app_config(app_type, instance_name, cluster, volume_type)
+            depl, svc = self.app_config(app_type,
+                                        instance_name,
+                                        cluster,
+                                        volume_type,
+                                        env_config)
             logging.debug("depl %s & svc %s" %(depl, svc))
             with open(depl) as fd1, open(svc) as fd2 :
                 depl_json = json.load(fd1)
@@ -349,14 +342,13 @@ class KubernetesClusters(tornado.web.RequestHandler):
         delete_service = self.get_argument('delete_service', False)
         force = self.get_argument('force', False)
 
-        if not instance_name or (app_type and app_type != 'mysql' and app_type != 'postgres'):
+        if not instance_name or app_type not in self.apps:
             logging.error("You have to define the app type and the instance name")
             raise tornado.web.HTTPError(BAD_REQUEST)
 
-        if app_type:
-            apps_dir = config.get('containers-provider', 'apps_dir')
-            app_conf_dir = apps_dir + '/' + app_type
-            instance_dir = app_conf_dir + '/' + instance_name.upper()
+        apps_dir = config.get('containers-provider', 'apps_dir')
+        app_conf_dir = apps_dir + '/' + app_type
+        instance_dir = app_conf_dir + '/' + instance_name.upper()
 
         # delete_urls: (url, use_cert=Boolean, method)
         if args.get('subresource') == 'deployments' and app_type:
@@ -378,8 +370,8 @@ class KubernetesClusters(tornado.web.RequestHandler):
             #secret_url = composed_url[:changeurl_index+1] + \
             #        '/api/v1/namespaces/default/secrets/' + \
             #        instance_name + '-secret-mysql.cnf'
-            conf_name = self.app_specifics[app_type]['conf_name']
-            init_name = self.app_specifics[app_type]['init_name']
+            conf_name = config.get(app_type, 'conf_name')
+            init_name = config.get(app_type, 'init_name')
             delete_urls.append((secrets_url + '/' + instance_name + '-secret-' + conf_name,
                                 True, 'delete'))
 
@@ -462,7 +454,7 @@ class KubernetesClusters(tornado.web.RequestHandler):
                 self.set_status(response.status_code)
             #self.write(self.api_response)
 
-        if app_type:
+        if app_type in self.apps:
             try:
                 rename(instance_dir, instance_dir + '.old')
             except OSError as e:
@@ -560,7 +552,7 @@ class KubernetesClusters(tornado.web.RequestHandler):
             logging.error("Error fetching cloud's resources in this endpoint: " + composed_url)
             raise tornado.web.HTTPError(status_code)
 
-    def app_config(self, app_type, instance_name, cluster_name, volume_type):
+    def app_config(self, app_type, instance_name, cluster_name, volume_type, env_config):
         """
         This function creates and prepares all the configuration files needed for the supported applications according to the existing templates.
 
@@ -582,8 +574,9 @@ class KubernetesClusters(tornado.web.RequestHandler):
         """
 
         # TODO try to initiate mysql through a bash file for consistency
-        instance_port = self.app_specifics[app_type]['port']
-        conf_name = self.app_specifics[app_type]['conf_name']
+        instance_port = config.get(app_type, 'port').split(',')
+        conf_name = config.get(app_type, 'conf_name')
+        init_name = config.get(app_type, 'init_name')
 
         apps_dir = config.get('containers-provider', 'apps_dir')
         app_conf_dir = apps_dir + '/' + app_type
@@ -593,12 +586,18 @@ class KubernetesClusters(tornado.web.RequestHandler):
         if path.isdir(app_conf_dir) and path.isdir(templates_dir):
             confFiles = set(listdir(app_conf_dir))
             templateFiles = set(listdir(templates_dir))
-            init_name = self.app_specifics[app_type]['init_name']
-            conf_required = set([init_name, 'templates'])
-            template_required = set([app_type + '-cnf.template',
-                                     app_type + '-depl.json.template',
+            conf_required = set(['templates'])
+
+            template_required = set([app_type + '-depl.json.template',
                                      app_type + '-secret.json.template',
                                      app_type + '-svc.json.template'])
+
+            if init_name:
+              conf_required.add(init_name)
+              template_required.add(app_type + '-secret.json.template')
+            if conf_name:
+              template_required.update([app_type + '-cnf.template',
+                                        app_type + '-secret.json.template'])
 
             if (conf_required - confFiles) or (template_required - templateFiles):
                 logging.error("Not all conf files of %s were found in %s" %(app_type, app_conf_dir))
@@ -626,7 +625,8 @@ class KubernetesClusters(tornado.web.RequestHandler):
         templates = Environment(loader=loader)
         configuration = {'app_type': app_type,
                          'instance_name': instance_name,
-                         'instance_port': instance_port
+                         'instance_port': instance_port,
+                         'env_params': env_config
                         }
 
 	filename = instance_dir + '/' + conf_name
@@ -684,12 +684,10 @@ class KubernetesClusters(tornado.web.RequestHandler):
 
         """
         # TODO separate secrets with cinder volumes
-        conf_name = self.app_specifics[app_type]['conf_name']
-        init_name = self.app_specifics[app_type]['init_name']
+        conf_name = config.get(app_type, 'conf_name')
+        init_name = config.get(app_type, 'init_name')
 
-        conf_file = app_conf_dir + '/' + instance_name.upper() + '/' + conf_name
         instance_dir = app_conf_dir + '/' + instance_name.upper()
-        init_file = app_conf_dir + '/' + init_name
         volume_url = config.get(self.cloud, 'volume_url')
         auth_id_url = config.get(self.cloud, 'auth_id_url')
 	logging.info("Create volumes for '%s' instance '%s'" %(app_type, instance_name))
@@ -700,16 +698,19 @@ class KubernetesClusters(tornado.web.RequestHandler):
         secret_url, cert, key, ca = self._config(secrets_args)
         volume_project_url = volume_url + '/' + project_id + '/volumes'
 
+        if conf_name:
+            conf_file = app_conf_dir + '/' + instance_name.upper() + '/' + conf_name
+        if init_name:
+            init_file = app_conf_dir + '/' + init_name
+
         exists_cnf = self.check_ifexists(instance_name+'-secret-' + app_type + '.cnf',
                                          secret_url, cert=cert, key=key, ca=ca)
-        if init_name:
-            exists_init = self.check_ifexists(instance_name+'-secret-init.sql',
-                                              secret_url, cert=cert, key=key, ca=ca)
-        else:
-            exists_init = 'Nothing'
 
+        exists_init = self.check_ifexists(instance_name+'-secret-init.sql',
+                                          secret_url, cert=cert, key=key, ca=ca)
         if not exists_cnf and not exists_init:
             # Secrets
+
             logging.info("Volumes will be created for project: %s" %(project_name))
 
             secret64 = ''
@@ -729,9 +730,9 @@ class KubernetesClusters(tornado.web.RequestHandler):
                           key=key,
                           ca=ca)
             logging.debug("%s conf file for secret volume has been created" %(kube_filename))
+            secret64 = ''
 
-            if exists_init != 'Nothing':
-                secret64 = ''
+            if init_name:
                 with open(init_file) as conf:
                     secret64 = b64encode(conf.read())
                 configuration = {'secret64': secret64,
