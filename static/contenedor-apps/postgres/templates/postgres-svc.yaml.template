@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ instance_name }}-svc
+spec:
+  selector:
+    app: {{ instance_name }}-app
+  type: NodePort
+  ports:
+  - targetPort: {{ instance_port }}
+    port: {{ instance_port }}
+    name: p0
+

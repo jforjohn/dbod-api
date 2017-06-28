@@ -1,0 +1,41 @@
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: mysqltest1-depl
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: mysqltest1-app
+    spec:
+      containers:
+      - image: gitlab-registry.cern.ch/db/dbod-mysql:5.7.17
+        imagePullPolicy: Always
+        volumeMounts:
+        - mountPath: /ORA/dbs03/MYSQLTEST1
+          name: volume-data
+        - mountPath: /ORA/dbs02/MYSQLTEST1
+          name: volume-bin
+        - mountPath: /docker-entrypoint-initdb.d
+          name: secret-init
+        - mountPath: /etc/mysql/conf.d
+          name: secret-conf
+        ports:
+        - containerPort: 5500
+          name: p0
+        name: contenedor-mysqltest1
+      imagePullSecrets:
+      - name: gitlab-registry
+      volumes:
+      - emptyDir: {}
+        name: volume-data
+      - emptyDir: {}
+        name: volume-bin
+      - secret:
+          secretName: mysqltest1-secret-init.sql
+        name: secret-init
+      - secret:
+          secretName: mysqltest1-secret-mysql.cnf
+        name: secret-conf

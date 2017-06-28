@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysqtest1-svc
+spec:
+  selector:
+    app: mysqtest1-app
+  type: NodePort
+  ports:
+  - targetPort: 5500
+    port: 5500
+    name: p0
+
