@@ -191,10 +191,11 @@ class KubernetesClusters(tornado.web.RequestHandler):
         volume_type = self.get_argument('vol_type', None)
 
         env_params = config.get(app_type, 'env_params').split(',')
-        env_config=[]
+        env_config = {}
         for param in env_params:
-            value = self.get_argument(env_params, None)
-            env_config.append((param, value))
+            value = self.get_argument(param, None)
+            if value:
+                env_config.update({param: value})
 
         if not volume_type:
             volume_type = 'emptyDir'
@@ -228,9 +229,13 @@ class KubernetesClusters(tornado.web.RequestHandler):
                                         env_config)
             logging.debug("depl %s & svc %s" %(depl, svc))
             with open(depl) as fd1, open(svc) as fd2 :
-                depl_json = json.load(fd1)
-                svc_json = json.load(fd2)
-                specs = [svc_json, depl_json]
+                depl_yaml = yaml.load_all(fd1)
+                svc_yaml = yaml.load_all(fd2)
+                specs = []
+                for svc in svc_yaml:
+                    specs.append(svc)
+                for depl in depl_yaml:
+                    specs.append(depl)
         else:
             try:
                 specs = [json.loads(self.request.body)]
@@ -245,14 +250,22 @@ class KubernetesClusters(tornado.web.RequestHandler):
         #if specs['kind'] != resource and specs['kind'] != subresource:
         #    logging.warning("Ensure that your request 'kind:%s' is for this endpoint" %(specs['kind']))
 
+        urls = [composed_url]
         # since service it's first in the list we compose the right url
         if len(specs) > 1:
-            temp = composed_url
+            urls = []
+            depl_url = composed_url
             service_args = self.get_resource_args(cluster, 'services', False)
-            composed_url, _,_,_ = self._config(service_args)
+            svc_url, _,_,_ = self._config(service_args)
+            for spec in specs:
+                if spec['kind'] == 'Service':
+                    urls = [svc_url] + urls
+                else:
+                    urls.append(depl_url)
 
-        for spec in specs:
-            logging.debug("Request to post" + composed_url)
+        logging.debug("URLs to be posted: %s" %(urls))
+        for spec, composed_url in zip(specs, urls):
+            logging.debug("Request to post " + composed_url)
             logging.debug("Data to be posted: %s" %(spec))
             response = requests.post(composed_url,
                                      json=spec,
@@ -271,8 +284,6 @@ class KubernetesClusters(tornado.web.RequestHandler):
             else:
                 logging.error("Error in posting %s 's resources from %s" %(self.coe, composed_url))
                 self.set_status(response.status_code)
-            if len(specs) > 1:
-                composed_url = temp
         self.write(self.api_response)
 
     @cloud_auth(coe)
@@ -574,7 +585,7 @@ class KubernetesClusters(tornado.web.RequestHandler):
         """
 
         # TODO try to initiate mysql through a bash file for consistency
-        instance_port = config.get(app_type, 'port').split(',')
+        instance_ports = config.get(app_type, 'ports').split(',')
         conf_name = config.get(app_type, 'conf_name')
         init_name = config.get(app_type, 'init_name')
 
@@ -588,16 +599,15 @@ class KubernetesClusters(tornado.web.RequestHandler):
             templateFiles = set(listdir(templates_dir))
             conf_required = set(['templates'])
 
-            template_required = set([app_type + '-depl.json.template',
-                                     app_type + '-secret.json.template',
-                                     app_type + '-svc.json.template'])
+            template_required = set([app_type + '-depl.yaml.template',
+                                     app_type + '-svc.yaml.template'])
 
             if init_name:
               conf_required.add(init_name)
-              template_required.add(app_type + '-secret.json.template')
+              template_required.add(app_type + '-secret.yaml.template')
             if conf_name:
               template_required.update([app_type + '-cnf.template',
-                                        app_type + '-secret.json.template'])
+                                        app_type + '-secret.yaml.template'])
 
             if (conf_required - confFiles) or (template_required - templateFiles):
                 logging.error("Not all conf files of %s were found in %s" %(app_type, app_conf_dir))
@@ -625,14 +635,15 @@ class KubernetesClusters(tornado.web.RequestHandler):
         templates = Environment(loader=loader)
         configuration = {'app_type': app_type,
                          'instance_name': instance_name,
-                         'instance_port': instance_port,
+                         'instance_ports': instance_ports,
                          'env_params': env_config
                         }
 
-	filename = instance_dir + '/' + conf_name
-        conf = templates.get_template(app_type + '-cnf.template').render(configuration)
-        self.template_write(conf, filename)
-	logging.debug("%s %s conf file is ready" %(filename, app_type))
+        if conf_name:
+          filename = instance_dir + '/' + conf_name
+          conf = templates.get_template(app_type + '-cnf.template').render(configuration)
+          self.template_write(conf, filename)
+          logging.debug("%s %s conf file is ready" %(filename, app_type))
 
         volume_data = None
         volume_bin = None
@@ -642,15 +653,15 @@ class KubernetesClusters(tornado.web.RequestHandler):
         configuration.update(self.get_volume_config(volume_type, volume_data, volume_bin))
 
         # resolve templates and write the new files
-	filename = instance_dir + '/' + 'depl.json'
-        controller_json = templates.get_template(app_type + '-depl.json.template').render(configuration)
-        self.template_write(controller_json, filename)
+	filename = instance_dir + '/' + 'depl.yaml'
+        controller_yaml = templates.get_template(app_type + '-depl.yaml.template').render(configuration)
+        self.template_write(controller_yaml, filename)
 	logging.debug("%s controller conf file is ready" %(filename))
         returnBack = [filename]
 
-        filename = instance_dir + '/' + 'svc.json'
-        service_json = templates.get_template(app_type + '-svc.json.template').render(configuration)
-        self.template_write(service_json, filename)
+        filename = instance_dir + '/' + 'svc.yaml'
+        service_yaml = templates.get_template(app_type + '-svc.yaml.template').render(configuration)
+        self.template_write(service_yaml, filename)
 	logging.debug("%s service conf file is ready" %(filename))
         returnBack.append(filename)
 
@@ -710,26 +721,26 @@ class KubernetesClusters(tornado.web.RequestHandler):
                                           secret_url, cert=cert, key=key, ca=ca)
         if not exists_cnf and not exists_init:
             # Secrets
-
             logging.info("Volumes will be created for project: %s" %(project_name))
 
-            secret64 = ''
-            with open(conf_file) as conf:
-                secret64 = b64encode(conf.read())
-            configuration = {'secret64': secret64,
-                             'filename': conf_name,
-                             'instance_name': instance_name
-                            }
-            kube_filename = instance_dir + '/' + 'secretconf.json'
-            conf_template = app_type + '-secret.json.template'
-            secretconf = templates.get_template(conf_template).render(configuration)
-            self.template_write(secretconf, kube_filename)
-            _ = self.postjson(secret_url, ('metadata', 'selfLink'), 'Secretconf',
-                          filename=kube_filename,
-                          cert=cert,
-                          key=key,
-                          ca=ca)
-            logging.debug("%s conf file for secret volume has been created" %(kube_filename))
+            if conf_name:
+              secret64 = ''
+              with open(conf_file) as conf:
+                  secret64 = b64encode(conf.read())
+              configuration = {'secret64': secret64,
+                               'filename': conf_name,
+                               'instance_name': instance_name
+                              }
+              kube_filename = instance_dir + '/' + 'secretconf.yaml'
+              conf_template = app_type + '-secret.yaml.template'
+              secretconf = templates.get_template(conf_template).render(configuration)
+              self.template_write(secretconf, kube_filename)
+              _ = self.postyaml(secret_url, ('metadata', 'selfLink'), 'Secretconf',
+                            filename=kube_filename,
+                            cert=cert,
+                            key=key,
+                            ca=ca)
+              logging.debug("%s conf file for secret volume has been created" %(kube_filename))
             secret64 = ''
 
             if init_name:
@@ -739,10 +750,10 @@ class KubernetesClusters(tornado.web.RequestHandler):
                                  'filename': init_name,
                                  'instance_name': instance_name
                                 }
-                kube_filename = app_conf_dir + '/' + 'secretinit.json'
+                kube_filename = app_conf_dir + '/' + 'secretinit.yaml'
                 secretconf = templates.get_template(conf_template).render(configuration)
                 self.template_write(secretconf, kube_filename)
-                _ = self.postjson(secret_url, ('metadata', 'selfLink'), 'Secretinit',
+                _ = self.postyaml(secret_url, ('metadata', 'selfLink'), 'Secretinit',
                                   filename=kube_filename,
                                   cert=cert,
                                   key=key,
@@ -787,14 +798,14 @@ class KubernetesClusters(tornado.web.RequestHandler):
                         }
                     }
             logging.debug("Volume conf: %s" %(volconf))
-            voldata = self.postjson(volume_project_url, ('volume','id'), 'Voldata',
-                                    jsondata=volconf)
+            voldata = self.postyaml(volume_project_url, ('volume','id'), 'Voldata',
+                                    yamldata=volconf)
             logging.debug("Volume data %s has been created" %(volconf['volume']['name']))
 
             volconf['volume']['name'] = instance_name + '-vol-bin'
             volconf['volume']['description'] = instance_name + '-volbin'
-            volbin = self.postjson(volume_project_url, ('volume','id'), 'Volbin',
-                                   jsondata=volconf)
+            volbin = self.postyaml(volume_project_url, ('volume','id'), 'Volbin',
+                                   yamldata=volconf)
             logging.debug("Volume data %s has been created" %(volconf['volume']['name']))
 	    return voldata, volbin
         elif exist_volume.count(True) == 2:
@@ -905,9 +916,9 @@ class KubernetesClusters(tornado.web.RequestHandler):
                     'volume_attr_bin': None
                    }
 
-    def postjson(self, composed_url, getBackfield, response_name,  **args):
+    def postyaml(self, composed_url, getBackfield, response_name,  **args):
         """
-        This function is used to post either a file or a json using the Openstack token or the certificates.
+        This function is used to post either a file or a yaml using the Openstack token or the certificates.
 
         :param composed_url: the Kubernetes url which will be accessed to POST
         :type composed_url: str
@@ -933,29 +944,29 @@ class KubernetesClusters(tornado.web.RequestHandler):
 	cert = args.get('cert')
 	key = args.get('key')
 	ca = args.get('ca')
-	jsondata = args.get('jsondata')
+	yamldata = args.get('yamldata')
 	logging.debug("Loading to Kubernetes volume configurations")
 
 	if filename:
 	    logging.debug("Load %s" %(filename))
 	    with open(filename) as fd:
 		try:
-		    jsonconf = json.load(fd)
+		    yamlconf = yaml.load(fd)
 		except:
-		    logging.error("The file %s is not in json format" %(filename))
+		    logging.error("The file %s is not in yaml format" %(filename))
 		    raise tornado.web.HTTPError(SERVICE_UNAVAILABLE)
-	elif isinstance(jsondata, dict):
-	    logging.debug("Load json %s" %(jsondata))
-	    jsonconf = jsondata
+	elif isinstance(yamldata, dict):
+	    logging.debug("Load yaml %s" %(yamldata))
+	    yamlconf = yamldata
 	else:
-	    jsonconf = None
+	    yamlconf = None
 
 	logging.debug("Post data to: %s" %(composed_url))
 
 	if cert and key and ca:
-	   response = requests.post(composed_url, cert=(cert, key), verify=ca, json=jsonconf)
+	   response = requests.post(composed_url, cert=(cert, key), verify=ca, json=yamlconf)
 	else:
-           response = requests.post(composed_url, json=jsonconf, headers=self.headers)
+           response = requests.post(composed_url, json=yamlconf, headers=self.headers)
 
         if response.ok:
            #data = response.json()
