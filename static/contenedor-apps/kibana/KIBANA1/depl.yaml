@@ -1,0 +1,25 @@
+
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: kibana1-depl
+  labels:
+    component: kibana1-kibana
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        component: kibana1-kibana
+    spec:
+      containers:
+      - name: contenedor-kibana1
+        image: jaysot/kibana:5.3.1
+        imagePullPolicy: Always
+        env:
+        - name: ELASTICSEARCH_URL
+          value: "http://es2-svc.default.svc.cluster.local:9200"
+        ports:
+        - containerPort: 5601
+          name: kibana-http
+          protocol: TCP
