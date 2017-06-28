@@ -1,0 +1,67 @@
+{% set cluster_name = env_params.get('CLUSTER_NAME', '') %}
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: {{ instance_name }}-depl
+  labels:
+    component: elasticsearch
+    cluster: {{ cluster_name }}
+    instance: {{ instance_name }}
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        component: elasticsearch
+        cluster: {{ cluster_name }}
+        instance: {{ instance_name }}
+      annotations:
+        pod.beta.kubernetes.io/init-containers: '[
+          {
+          "name": "sysctl",
+            "image": "busybox",
+            "imagePullPolicy": "IfNotPresent",
+            "command": ["sysctl", "-w", "vm.max_map_count=262144"],
+            "securityContext": {
+              "privileged": true
+            }
+          }
+        ]'
+    spec:
+      containers:
+      - name: contenedor-{{ cluster_name }}-{{ instance_name }}
+        securityContext:
+          privileged: false
+          capabilities:
+            add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+        image: jaysot/elasticsearch:5.3.1
+        imagePullPolicy: Always
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        {% for param, value in env_params.iteritems() %}
+        - name: {{ param }}
+          value: "{{ value }}"
+        {% endfor %}
+        - name: DISCOVERY_SERVICE
+          value: {{ cluster_name }}-discovery
+        ports:
+        {% for port in instance_ports %}
+        - containerPort: {{ port }}
+          name: port-{{ port }}
+          protocol: TCP
+        {% endfor %}
+        volumeMounts:
+        - name: data
+          mountPath: /usr/share/elasticsearch/data
+        - name: logs
+          mountPath: /usr/share/elasticsearch/logs
+      volumes:
+        - emptyDir: {}
+          name: data
+        - emptyDir: {}
+          name: logs

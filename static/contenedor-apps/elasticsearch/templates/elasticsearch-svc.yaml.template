@@ -1,0 +1,37 @@
+{% set cluster_name = env_params.get('CLUSTER_NAME', '') %}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ cluster_name }}-discovery
+  labels:
+    component: elasticsearch
+    cluster: {{ cluster_name }}
+spec:
+  selector:
+    component: elasticsearch
+    cluster: {{ cluster_name }}
+  type: NodePort
+  ports:
+  - name: port-9300
+    port: 9300
+    protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ instance_name }}-svc
+  labels:
+    component: elasticsearch
+    cluster: {{ cluster_name }}
+    instance: {{ instance_name }}
+spec:
+  selector:
+    component: elasticsearch
+    cluster: {{ cluster_name }}
+    instance: {{ instance_name }}
+  type: NodePort
+  ports:
+  - name: port-9200
+    port: 9200
+    protocol: TCP
+
