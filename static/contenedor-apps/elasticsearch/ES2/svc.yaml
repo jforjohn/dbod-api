@@ -1,0 +1,36 @@
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: smonnet1-discovery
+  labels:
+    component: elasticsearch
+    cluster: smonnet1
+spec:
+  selector:
+    component: elasticsearch
+    cluster: smonnet1
+  type: NodePort
+  ports:
+  - name: port-9300
+    port: 9300
+    protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: es2-svc
+  labels:
+    component: elasticsearch
+    cluster: smonnet1
+    instance: es2
+spec:
+  selector:
+    component: elasticsearch
+    cluster: smonnet1
+    instance: es2
+  type: NodePort
+  ports:
+  - name: port-9200
+    port: 9200
+    protocol: TCP

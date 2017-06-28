@@ -1,0 +1,74 @@
+{
+  "kind": "Deployment",
+  "spec": {
+    "template": {
+      "spec": {
+        "containers": [
+          {
+            "env": [
+              {
+                "name": "ES_JAVA_OPTS",
+                "value": "-Xms512m -Xmx512m"
+              }
+            ],
+            "image": "elasticsearch",
+            "imagePullPolicy": "Always",
+            "volumeMounts": [
+              {
+                "mountPath": "/usr/share/elasticsearch/data",
+                "name": "volume-data"
+              },
+              {
+                "mountPath": "/usr/share/elasticsearch/logs",
+                "name": "volume-bin"
+              },
+              {
+                "mountPath": "/usr/share/elasticsearch/config",
+                "name": "secret-conf"
+              }
+            ],
+            "ports": [
+              {
+                "containerPort": 9200,
+                "name": "p0"
+              }
+            ],
+            "name": "contenedor-es1"
+          }
+        ],
+        "volumes": [
+          {
+            "emptyDir": {
+              "None": "None",
+              "None": "None"
+            },
+            "name": "volume-data"
+          },
+          {
+            "emptyDir": {
+              "None": "None",
+              "None": "None"
+            },
+            "name": "volume-bin"
+          },
+          {
+            "secret": {
+              "secretName": "es1-secret-elasticsearch.yml"
+            },
+            "name": "secret-conf"
+          }
+        ]
+      },
+      "metadata": {
+        "labels": {
+          "app": "es1-app"
+        }
+      }
+    },
+    "replicas": 1
+  },
+  "apiVersion": "extensions/v1beta1",
+  "metadata": {
+    "name": "es1-depl"
+  }
+}
