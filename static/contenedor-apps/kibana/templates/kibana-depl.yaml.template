@@ -1,0 +1,25 @@
+{% set client_node = env_params.get('CLIENT_NODE', '') %}
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: {{ instance_name }}-depl
+  labels:
+    component: {{ instance_name }}-kibana
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        component: {{ instance_name }}-kibana
+    spec:
+      containers:
+      - name: contenedor-{{ instance_name }}
+        image: jaysot/kibana:5.3.1
+        imagePullPolicy: Always
+        env:
+        - name: ELASTICSEARCH_URL
+          value: "http://{{ client_node }}-svc.default.svc.cluster.local:9200"
+        ports:
+        - containerPort: 5601
+          name: kibana-http
+          protocol: TCP
