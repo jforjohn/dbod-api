@@ -190,13 +190,6 @@ class KubernetesClusters(tornado.web.RequestHandler):
         instance_name = self.get_argument('app_name', None)
         volume_type = self.get_argument('vol_type', None)
 
-        env_params = config.get(app_type, 'env_params').split(',')
-        env_config = {}
-        for param in env_params:
-            value = self.get_argument(param, None)
-            if value:
-                env_config.update({param: value})
-
         if not volume_type:
             volume_type = 'emptyDir'
 
@@ -215,6 +208,13 @@ class KubernetesClusters(tornado.web.RequestHandler):
 
                     logging.error("For NFS you need to provide also the server and the path")
                     raise tornado.web.HTTPError(BAD_REQUEST)
+
+            env_params = config.get(app_type, 'env_params').split(',')
+            env_config = {}
+            for param in env_params:
+                value = self.get_argument(param, None)
+                if value:
+                    env_config.update({param: value})
 
             # when all the right params are present it will prepare to deploy all the necessary
             # components of the application along with the volumes
@@ -272,6 +272,7 @@ class KubernetesClusters(tornado.web.RequestHandler):
                                      cert=(cert, key),
                                      verify=ca,
                                      headers=self.headers)
+            print response.text
             if response.ok:
                 data = response.json()
                 logging.info("response: " + json.dumps(data))
