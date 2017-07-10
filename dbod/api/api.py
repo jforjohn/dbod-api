@@ -20,6 +20,7 @@ import tornado.web
 from tornado.options import parse_command_line, options, define
 from tornado.log import LogFormatter, logging
 from tornado.httpserver import HTTPServer
+import tornado.autoreload
 from tornado.ioloop import IOLoop
 
 from dbod.api.base import DocHandler
@@ -33,7 +34,8 @@ from dbod.api.attribute import Attribute
 from dbod.api.fim import Fim
 from dbod.api.magnum import MagnumClusters
 from dbod.api.kubernetes import KubernetesClusters
-from dbod.config import config, optionalConfig
+from dbod.api.smonit import Smonit
+from dbod.config import config, optionalConfig, config_file
 
 # This list is a global object because in needs to be accessed
 # from the test suites
@@ -49,11 +51,12 @@ handlers = [
     (r"/api/v1/rundeck/resources.xml", RundeckResources),
     (r"/api/v1/rundeck/job/(?P<job>[^\/]+)/?(?P<node>[^\/]+)?", RundeckJobs),
     # Deprecated, will be deleted in following versions
-    (r"/api/v1/metadata/(?P<class>[^\/]+)/?(?P<name>[^\/]+)?", Metadata),  
+    (r"/api/v1/metadata/(?P<class>[^\/]+)/?(?P<name>[^\/]+)?", Metadata),
     (r"/api/v1/fim/([^/]+)", Fim),
     (r"/api/v1/magnum/(?P<resource>[^/]+)/?(?P<name>[^/]+)?", MagnumClusters),
     (r"/api/v1/kubernetes/(?P<cluster>[^/]+)/?(?P<resource>[^/]+)?/?(?P<name>[^/]+)?/?(?P<subresource>[^/]+)?/?(?P<subname>[^/]+)?", KubernetesClusters),
     (r"/api/v1/beta/kubernetes/(?P<cluster>[^/]+)/?(?P<resource>[^/]+)?/?(?P<name>[^/]+)?/?(?P<subresource>[^/]+)?/?(?P<subname>[^/]+)?", KubernetesClusters),
+    (r"/api/v1/smonit/(?P<name>[^\/]+)", Smonit),
     ]
 
 class Application():
@@ -130,7 +133,9 @@ class Application():
             
         # Listening port
         http_server.listen(options.port)
-        
+
+        tornado.autoreload.start()
+        tornado.autoreload.watch(config_file)
         # Starting
         logging.info("Starting application on port: " + str(port))
         tornado.ioloop.IOLoop.instance().start()
