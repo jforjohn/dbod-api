@@ -1,7 +1,8 @@
 #!/usr/bin/python
+import multiprocessing as mp
 from kafka import KafkaConsumer
 from kafka.coordinator.assignors.roundrobin import RoundRobinPartitionAssignor
-from elasticsearch import Elasticsearch, helpers, RequestsHttpConnection
+from elasticsearch import Elasticsearch, helpers
 #from translateIP import mapIP
 import logging
 import signal
@@ -12,25 +13,23 @@ import yaml
 from yaml import load
 from yaml import CLoader as Loader
 import time, datetime
-from os import getpid
 import ConfigParser
-import pandas as pd
-#from dbod.config import config, config_file
+from functools import partial
+from os import getpid
 
 class Initialize:
   def SetupES(self, escluster):
-    loggerIndex.info("Connecting to Elasticsearch cluster: %s" %(escluster))
+    loggerIndex.info('Connecting to Elasticsearch cluster')
     try:
-      es = (Elasticsearch(escluster,
-                http_auth = ('elastic', 'changeme'),
-                connection_class=RequestsHttpConnection
-                #sniff_on_start=True,
-                #sniff_on_connection_fail=True,
-                #sniffer_timeout=120
-                ))
+      es = Elasticsearch(escluster,
+            http_auth=('elastic', 'changeme'),
+            #sniff_on_start=True,
+            #sniff_on_connection_fail=True,
+            #sniffer_timeout=120
+            )
+      return es
     except Exception, e:
       loggerConsumer.error("During Elasticsearch cluster instantiation: %s" %e)
-    return es
 
   def SetupConsumer(self):
     # To consume latest messages and auto-commit offsets
@@ -41,9 +40,9 @@ class Initialize:
                               bootstrap_servers=['smonnet-brpr1.cern.ch:9092','smonnet-brpr2.cern.ch:9092'],
                               max_partition_fetch_bytes=20000000,
                               partition_assignment_strategy=[RoundRobinPartitionAssignor])
+      return myConsumer
     except Exception, e:
       loggerConsumer.error("During consumer instantiation: %s" %e)
-    return myConsumer
 
 class MonConfig(Initialize):
   def EScluster(self, service_ports, monitor_nodes):
@@ -66,7 +65,11 @@ class MonConfig(Initialize):
   def ClusterConnections(self):
     esConnections = []
     monitor_nodes = config.get('smonit','monitor_nodes').split(',')
-    services_ports = config.get('smonit','services_ports').split('-')
+    services_ports_str = config.get('smonit','services_ports')
+    if services_ports_str:
+      services_ports = services_ports_str.split('-')
+    else:
+      services_ports = []
     for ports in services_ports:
       service_ports = ports.split(',')
       escluster = self.EScluster(service_ports, monitor_nodes)
@@ -76,69 +79,60 @@ class MonConfig(Initialize):
 
   def FilterOutParams(self):
     filterParams = []
-    monitor_params = config.get('smonit', 'monitor_params').split('-')
+    monitor_params_str = config.get('smonit', 'monitor_params')
+    if monitor_params_str:
+      monitor_params = monitor_params_str.split('-')
+    else:
+      monitor_params = []
     for param in monitor_params:
       cluster_params = param.split(',')
+      '''
       filter_out = []
       i = 0
       while i < len(cluster_params)-1:
         filter_out.append((cluster_params[i], cluster_params[i+1]))
         i += 2
       filterParams.append(filter_out)
+      '''
+      filterParams.append((cluster_params[0], cluster_params[1]))
     return filterParams
+
 
 
 class MessageHandler():
   def __init__(self, es, filter_params):
+    child_procs = config.get('smonit', 'child_procs')
+    if child_procs:
+      child_procs =  child_procs + ',' + str(getpid())
+    else:
+      child_procs = getpid()
+    with open(config_file, 'w') as fd:
+      config.set('smonit', 'child_procs', child_procs)
+      config.write(fd)
+
+    self.data = dict()
+    self.send_data = list()
     self.es = es
     self.filter_params = filter_params
-    self.send_data = [[]] * len(es)
     self.vari = [21]
 
-  def NewMonitor(self, *args):
-    config.read(config_file)
-    mon_config = MonConfig()
-    new_config = config.get('smonit', 'new').split(',')
-    print new_config
-    if new_config[0] == 'reload':
-      self.es = mon_config.ClusterConnections()
-      print self.es
-      self.filter_params = mon_config.FilterOutParams()
-    else:
-      loggerConsumer.info("Updating with new config %s" %(new_config))
-      new_filters = [(new_config[1], new_config[2])]
-      self.filter_params.append(new_filters)
-      monitor_nodes = config.get('smonit', 'monitor_nodes').split(',')
-      new_ports = new_config[3:]
-      new_cluster = mon_config.EScluster(new_ports, monitor_nodes)
-      self.es.append(new_cluster)
-      self.send_data.append([])
-    print args
-    loggerConsumer.info("New cluster %s and filters %s" %(self.es, self.filter_params))
-    return
-
   def Accept(self, body, message):
-    signal.signal(signal.SIGHUP, self.NewMonitor)
     try:
       #self.payload.append(self.EmbedData(body))
-      for i in range(len(self.filter_params)):
-        cluster_filters = self.filter_params[i]
-        self.send_data[i].append(self.EmbedData(body, cluster_filters))
+      self.EmbedData(body)
     except Exception, e:
       loggerConsumer.error('Discarding message - failed to append to payload: %s' % e)
 
-    #print len(self.send_data[0])
-    if len(self.send_data[0]) >= 2:
-      #topic = message.topic
-      for i in range(len(self.es)):
-        es_cluster = self.es[i]
-        data = filter(None, self.send_data[i])
-        if len(data) > 0:
-          if i == 1:
-            print 'ela'
-          self.PushMessage(es_cluster, data)
+    #self.Encapsulate()
+    #print len(self.send_data)
 
-  def EmbedData(self, body, cluster_filters):
+    if len(self.send_data) >= 3500:
+      #topic = message.topic
+      self.send_data = filter(None, self.send_data)
+      if self.send_data:
+        self.PushMessage(self.es)
+
+  def EmbedData(self, body):
     sflowSample = dict()
     '''
     timestamp = 'T'.join(
@@ -147,6 +141,7 @@ class MessageHandler():
     '''
     timestamp = int(time.time() * 1000)
 
+    #print timestamp
     fields = body.split(',')
     if fields[0] == "FLOW":
       sflow_ReporterIP = fields[1]
@@ -180,14 +175,13 @@ class MessageHandler():
         sflow_counter = fields[20]
       except:
         sflow_counter = -1
-
       #dateTime = int(time.time()*1000000)
-
       #[sflow_NEWsrcIP,sflow_NEWdstIP] = map(mapIP, [sflow_srcIP,sflow_dstIP])
       #srcIPnew = mapIP(srcIP)
       #dstIPnew = mapIP(dstIP)
+      #[sflow_NEWsrcIP, sflow_NEWdstIP] = map(self.mapIP, [sflow_srcIP,sflow_dstIP])
 
-      #[sflow_inputPort,sflow_outputPort,sflow_srcVlan,sflow_dstVlan,sflow_IP_Protocol,sflow_IPTTL,sflow_srcPort,sflow_dstPort,sflow_PacketSize,sflow_IPSize,sflow_SampleRate,sflow_SampleRate] = map(int, [sflow_inputPort,sflow_outputPort,sflow_srcVlan,sflow_dstVlan,sflow_IP_Protocol,sflow_IPTTL,sflow_srcPort,sflow_dstPort,sflow_PacketSize,sflow_IPSize,sflow_SampleRate,sflow_SampleRate])
+      [sflow_inputPort,sflow_outputPort,sflow_srcVlan,sflow_dstVlan,sflow_IP_Protocol,sflow_IPTTL,sflow_srcPort,sflow_dstPort,sflow_PacketSize,sflow_IPSize,sflow_SampleRate,sflow_SampleRate] = map(int, [sflow_inputPort,sflow_outputPort,sflow_srcVlan,sflow_dstVlan,sflow_IP_Protocol,sflow_IPTTL,sflow_srcPort,sflow_dstPort,sflow_PacketSize,sflow_IPSize,sflow_SampleRate,sflow_SampleRate])
 
       sflowSample = {
       '@message':body,
@@ -213,37 +207,26 @@ class MessageHandler():
       'sflow_tcpFlags':sflow_tcpFlags,
       'sflow_PacketSize':sflow_PacketSize,
       'sflow_IPSize':sflow_IPSize,
-      'sflow_SampleRate':sflow_SampleRate
+      'sflow_SampleRate':sflow_SampleRate,
       #'sflow_NEWsrcIP':sflow_NEWsrcIP,
       #'sflow_NEWdstIP':sflow_NEWdstIP
       }
-
-      sample_in = False
-      if cluster_filters:
-        sample_in = True
-        for param in cluster_filters:
-          sample_in = (sample_in and (str(sflowSample.get(param[0])) == param[1]))
-
-      if sample_in:
+      if str(sflowSample.get(self.filter_params[0])) == self.filter_params[1]:
+        if self.filter_params[1] == '10.100.0.9':
+          print '10.100.0.9'
         [sflow_NEWsrcIP, sflow_NEWdstIP] = map(self.mapIP, [sflow_srcIP,sflow_dstIP])
         sflowSample.update({'sflow_NEWsrcIP': sflow_NEWsrcIP,
                             'sflow_NEWdstIP': sflow_NEWdstIP
                           })
-        datestr  = time.strftime('%Y.%m.%d')
-        indexstr = '%s-%s' % ('sflow', datestr)
-
-        sflowSample = {'_op_type': 'index',
-             '_index' : indexstr,
-             '_type': 'sflow',
-             '_source': sflowSample
-             }
+        self.Encapsulate(sflowSample)
       else:
-        sflowSample = {}
-
+        #sflowSample = {}
+        self.send_data.append({})
     else:
-      sflowSample = {}
+      #sflowSample = {}#{'type':body}
+      self.send_data.append({})
 
-    return sflowSample
+    #return sflowSample
 
   def mapIP(self,param):
     try:
@@ -251,27 +234,17 @@ class MessageHandler():
     except:
       return param
 
-  def Encapsulate(self, sflowSample):
-    #loggerIndex.info('Compiling Elasticsearch payload with  records') #% len(self.payload))
-
+  def Encapsulate(self, sample):
     datestr  = time.strftime('%Y.%m.%d')
     indexstr = '%s-%s' % ('sflow', datestr)
-    pandasList = pd.DataFrame(sflowSample)
-    pandasJson = pandasList.to_json(orient='records')
-    return json.loads(pandasJson)
-    '''
-    header = pandasList.columns
-    for i in range(len(pandasList)):
-      source_dict = {}
-      row = pandasList.iloc[i]
-      for k in header:
-        source_dict[k] = str(row[k])
-      yield {'_op_type': 'index',
-             '_index' : indexstr,
-             '_type': 'sflow',
-             '_source': source_dict
-            }
-    '''
+
+    self.send_data.append({
+      '_index' : indexstr,
+      '_type': 'sflow',
+      '_source': sample
+    })
+
+    #loggerIndex.info('Compiling Elasticsearch payload with  records') #% len(self.payload))
     #header = json.dumps(header)
     #body   = ''
     #data   = ''
@@ -281,59 +254,96 @@ class MessageHandler():
 
     #return send_data
 
-  def PushMessage(self, es, data):
-    #try:
-    #r = requests.post('%s/_bulk?' % args.elasticserver, data=data, timeout=args.timeout)
-    #helpers.parallel_bulk(es, data, chunk_size=5)
-    for success, info in helpers.parallel_bulk(es, data, chunk_size=100):
-      #print '\n', info, success
-      #print info, success
-      #print es
-      if not success:
-        loggerIndex.error("A document failed: %s" %(info))
-    self.send_data = [[]] * len(self.es)
-    #loggerIndex.info('Bulk API request to Elasticsearch returned with code ' )
-    #except Exception, e:
-    #  loggerIndex.error('Failed to send data to Elasticsearch: %s' %(e))
+  def PushMessage(self, es):
+    try:
+      #r = requests.post('%s/_bulk?' % args.elasticserver, data=data, timeout=args.timeout)
+      #helpers.parallel_bulk(es, data, chunk_size=5)
+      print self.es
+      for success, info in helpers.parallel_bulk(es, self.send_data, chunk_size=3500):
+        #print '\n', info, success
+        #print info, success
+        #print self.vari, success
+        if not success:
+          print('A document failed:', info)
+      self.data = {}
+      self.send_data = []
+      #loggerIndex.info('Bulk API request to Elasticsearch returned with code ' )
+    except Exception, e:
+      loggerIndex.error('Failed to send to Elasticsearch: %s' % e)
 
 class StreamConsumer():
   def __init__(self, connection, callback):
     self.callback   = callback
     self.connection = connection
+    #self.es = es
 
   #def close(self, *args, **kwargs):
     #self.connection.close()
     #exit(0)
 
-
-  def closeConsumer(self, *args):
-    loggerConsumer.info('Signal handler called with signal: ' %(args))
-    self.connection.close()
-    sys.exit(0)
-
   def runConsumer(self):
-    #try:
-    for message in self.connection:
-      body = message.value #json.loads(message.value)
-      self.callback(body, message)
-    #except Exception, e:
-    #  loggerConsumer.error("During messages parsing exception: %s" %e)
+    try:
+      for message in self.connection:
+        body = message.value #json.loads(message.value)
+        self.callback(body, message)
+    except Exception, e:
+      loggerConsumer.error("During messages parsing exception: %s" %e)
 
+def newMonitor(kafkaConnection, *args):
+  config.read(config_file)
+  mon_config = MonConfig()
+  new_config = config.get('smonit', 'new_monitor').split(',')
+  loggerIndex.info("New config arrived: %s" %(new_config))
+  '''
+  if new_config[0] == 'reload':
+    new_esConnection = mon_config.ClusterConnections()
+    new_filter_params = mon_config.FilterOutParams()
+  else:
+  '''
+  new_filterParams = (new_config[1], new_config[2])
+  monitor_nodes = config.get('smonit', 'monitor_nodes').split(',')
+  new_ports = new_config[3:]
+  new_cluster = mon_config.EScluster(new_ports, monitor_nodes)
+  new_esConnection = mon_config.SetupES(new_cluster)
+  p = mp.Process(target=start, args=(kafkaConnection,new_esConnection,new_filterParams))
+  p.start()
+  print args
+
+
+def closeConsumer(connection, *args):
+  loggerConsumer.info('Signal handler called with signal: %s' %(args))
+  # restore the original signal handler as otherwise evil things will happen
+  # in raw_input when CTRL+C is pressed, and our signal handler is not re-entrant
+  signal.signal(signal.SIGINT, original_sigint)
+  self.connection.close()
+  try:
+    sys.exit(0)
+  except KeyboardInterrupt:
+    sys.exit(1)
+
+def start(kafkaConnection, esConnections, filterParams):
+  handler = MessageHandler(esConnections, filterParams)
+  consumer = StreamConsumer(kafkaConnection, handler.Accept)
+  consumer.runConsumer()
 
 if __name__ == '__main__':
-  #def main():
   global loggerConsumer
   global loggerIndex
   global test
-  global config
-  global config_file
+  #pr_queue = mp.Queue()
 
   config = ConfigParser.ConfigParser()
   config_file = "/home/smonnet/dbod-api/api.cfg"
   config.read(config_file)
+  # set pid in the config file (for receiving later the SIGHUP)
+  with open(config_file, 'w') as fd:
+    config.set('smonit', 'processing_pid', getpid())
+    config.write(fd)
+
   # create logger
-  stream = open("jsonIPmap.yaml", 'r')
-  test = yaml.load(stream, Loader=Loader)
+  with open("jsonIPmap.json", 'r') as fd:
+    test = json.load(fd)
+    #test = yaml.load(fd, Loader=Loader)
 
   loggerConsumer = logging.getLogger('kafka consumer')
   loggerConsumer.setLevel(logging.DEBUG)
@@ -354,25 +364,26 @@ if __name__ == '__main__':
   loggerConsumer.addHandler(logDest)
   loggerIndex.addHandler(logDest)
 
-  # set pid in the config file (for receiving later the SIGHUP)
-  with open(config_file, 'w') as fd:
-    config.set('smonit', 'processing_pid', getpid())
-    config.write(fd)
+  mon_config = MonConfig()
+  esConnections = mon_config.ClusterConnections()
+  filterParams = mon_config.FilterOutParams()
+  loggerIndex.info("Initialization: es connections: %s" %(esConnections))
+  loggerIndex.info("Filter in params: %s" %(filterParams))
 
   init_set = Initialize()
   kafkaConnection = init_set.SetupConsumer()
 
-  mon_config = MonConfig()
-  esConnections = mon_config.ClusterConnections()
-  filterParams = mon_config.FilterOutParams()
-
-  loggerIndex.info("Initialization: es connections: %s and filters: %s"
-                   %(esConnections, filterParams))
-  #esConnection = SetupES()
-  handler = MessageHandler(esConnections, filterParams)
-
-  consumer = StreamConsumer(kafkaConnection, handler.Accept)
-
-  signal.signal(signal.SIGINT, consumer.closeConsumer)
-
-  consumer.runConsumer()
+  original_sigint = signal.getsignal(signal.SIGINT)
+  signal.signal(signal.SIGHUP, partial(newMonitor, kafkaConnection))
+  #signal.signal(signal.SIGINT, partial(closeConsumer, kafkaConnection))
+  #start(kafkaConnection, esConnections, filterParams)
+  processes =  [mp.Process(target=start,
+                args=(kafkaConnection,esConnections[i],filterParams[i]))
+                for i in range(len(esConnections))]
+  for p in processes:
+    #p.daemon = True
+    p.start()
+  signal.signal(signal.SIGINT, partial(closeConsumer, kafkaConnection))
+  #handler = MessageHandler(esConnections, filterParams)
+  #consumer = StreamConsumer(kafkaConnection, handler.Accept)
+  #consumer.runConsumer()
