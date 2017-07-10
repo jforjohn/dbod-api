@@ -87,6 +87,9 @@ class KubernetesClusters(tornado.web.RequestHandler):
     kubeApi = ''
     api_response = {'response': []}
 
+    def initialize(self):
+      self.api_response = {'response': []}
+
     @cloud_auth(coe)
     def get(self, **args):
 	"""
@@ -181,7 +184,7 @@ class KubernetesClusters(tornado.web.RequestHandler):
                 * When the <*app_type*> request body parameter is not present, no other modifications are made and just the specific resource from the request body it will be posted
 
         """
-
+        print self.api_response
         logging.debug('Arguments:' + str(self.request.arguments))
         composed_url, cert, key, ca = self._config(args)
         cluster = args.get('cluster')
@@ -272,20 +275,21 @@ class KubernetesClusters(tornado.web.RequestHandler):
                                      cert=(cert, key),
                                      verify=ca,
                                      headers=self.headers)
-            print response.text
             if response.ok:
                 data = response.json()
                 logging.info("response: " + json.dumps(data))
                 # the spec['kind'] is the type of resource
                 self.api_response['response'].append({spec['kind']: data})
+                self.set_status(response.status_code)
             elif response.status_code == 409:
                 logging.warning("The name %s in the endpoint %s already exists"
                         %(spec['metadata']['name'],composed_url))
-                self.set_status(CONFLICT)
+                self.set_status(response.status_code)
             else:
                 logging.error("Error in posting %s 's resources from %s" %(self.coe, composed_url))
                 self.set_status(response.status_code)
         self.write(self.api_response)
+        self.api_response = {'response': []}
 
     @cloud_auth(coe)
     @http_basic_auth
