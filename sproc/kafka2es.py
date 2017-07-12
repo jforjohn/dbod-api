@@ -3,6 +3,7 @@ import multiprocessing as mp
 from kafka import KafkaConsumer
 from kafka.coordinator.assignors.roundrobin import RoundRobinPartitionAssignor
 from elasticsearch import Elasticsearch, helpers
+from elasticsearch.client import IndicesClient
 #from translateIP import mapIP
 import logging
 import signal
@@ -110,6 +111,8 @@ class MessageHandler():
       config.set('smonit', 'child_procs', child_procs)
       config.write(fd)
 
+    with open('sproc/template.json') as fd:
+      IndicesClient(es).put_template('sflow_template', body=json.load(fd))
     self.data = dict()
     self.send_data = list()
     self.es = es
@@ -126,7 +129,7 @@ class MessageHandler():
     #self.Encapsulate()
     #print len(self.send_data)
 
-    if len(self.send_data) >= 3500:
+    if len(self.send_data) >= 7000:
       #topic = message.topic
       self.send_data = filter(None, self.send_data)
       if self.send_data:
@@ -341,7 +344,7 @@ if __name__ == '__main__':
     config.write(fd)
 
   # create logger
-  with open("jsonIPmap.json", 'r') as fd:
+  with open("sproc/jsonIPmap.json", 'r') as fd:
     test = json.load(fd)
     #test = yaml.load(fd, Loader=Loader)
 
