@@ -1,5 +1,7 @@
 #!/usr/bin/python
 import multiprocessing as mp
+import threading
+from Queue import Queue
 from kafka import KafkaConsumer
 from kafka.coordinator.assignors.roundrobin import RoundRobinPartitionAssignor
 from elasticsearch import Elasticsearch, helpers
@@ -39,7 +41,7 @@ class Initialize:
       myConsumer = KafkaConsumer('sflow2',
                               group_id='sflow-myConsumerz',
                               bootstrap_servers=['smonnet-brpr1.cern.ch:9092','smonnet-brpr2.cern.ch:9092'],
-                              max_partition_fetch_bytes=20000000,
+                              max_partition_fetch_bytes=200000,
                               partition_assignment_strategy=[RoundRobinPartitionAssignor])
       return myConsumer
     except Exception, e:
@@ -117,7 +119,9 @@ class MessageHandler():
     self.send_data = list()
     self.es = es
     self.filter_params = filter_params
-    self.vari = [21]
+    self.queue = Queue()
+    self.push = threading.Thread(target=self.PushMessage)
+    self.no_threads = 0
 
   def Accept(self, body, message):
     try:
@@ -129,11 +133,40 @@ class MessageHandler():
     #self.Encapsulate()
     #print len(self.send_data)
 
-    if len(self.send_data) >= 7000:
+    if len(self.send_data) >= 5000:
       #topic = message.topic
       self.send_data = filter(None, self.send_data)
       if self.send_data:
-        self.PushMessage(self.es)
+        self.no_threads += 1
+        if self.no_threads < 5:
+          self.push = threading.Thread(target=self.PushMessage)
+          self.push.start()
+          self.queue.put(1)
+        else:
+          self.no_threads = 0
+          self.queue.join()
+          self.push = threading.Thread(target=self.PushMessage)
+          self.push.start()
+          self.queue.put(1)
+        '''
+        print 'edo ', self.queue.qsize()
+        if self.queue.qsize() < self.no_threads:
+          try:
+            self.push.start()
+            self.queue.put(1)
+            print 'Alive thread'
+          except RuntimeError: #occurs if thread is dead
+            print 'Dead Thread', self.queue.qsize()
+            self.push = threading.Thread(target=self.PushMessage)
+            self.push.start()
+            self.queue.put(1)
+        else:
+          print 'Full'
+          self.queue.join()
+          self.push = threading.Thread(target=self.PushMessage)
+          self.push.start()
+          self.queue.put(1)
+        '''
 
   def EmbedData(self, body):
     sflowSample = dict()
@@ -156,11 +189,11 @@ class MessageHandler():
       sflow_srcVlan = fields[7]
       sflow_dstVlan = fields[8]
       sflow_srcIP = fields[9]
+      sflow_dstIP = fields[10]
       try:
         socket.inet_pton(socket.AF_INET, sflow_srcIP)
       except:
         sflow_srcIP = '0.0.0.0'
-      sflow_dstIP = fields[10]
       try:
         socket.inet_pton(socket.AF_INET, sflow_dstIP)
       except:
@@ -215,19 +248,26 @@ class MessageHandler():
       #'sflow_NEWdstIP':sflow_NEWdstIP
       }
       if str(sflowSample.get(self.filter_params[0])) == self.filter_params[1]:
-        if self.filter_params[1] == '10.100.0.9':
-          print '10.100.0.9'
         [sflow_NEWsrcIP, sflow_NEWdstIP] = map(self.mapIP, [sflow_srcIP,sflow_dstIP])
         sflowSample.update({'sflow_NEWsrcIP': sflow_NEWsrcIP,
                             'sflow_NEWdstIP': sflow_NEWdstIP
                           })
-        self.Encapsulate(sflowSample)
+        datestr  = time.strftime('%Y.%m.%d')
+        indexstr = '%s-%s' % ('sflow', datestr)
+        #self.Encapsulate(sflowSample)
+        self.send_data.append({
+                      '_index' : indexstr,
+                      '_type': 'sflow',
+                      '_source': sflowSample
+                             })
       else:
         #sflowSample = {}
-        self.send_data.append({})
+        #self.send_data.append({})
+        pass
     else:
       #sflowSample = {}#{'type':body}
-      self.send_data.append({})
+      #self.send_data.append({})
+      pass
 
     #return sflowSample
 
@@ -257,22 +297,26 @@ class MessageHandler():
 
     #return send_data
 
-  def PushMessage(self, es):
-    try:
-      #r = requests.post('%s/_bulk?' % args.elasticserver, data=data, timeout=args.timeout)
-      #helpers.parallel_bulk(es, data, chunk_size=5)
-      print self.es
-      for success, info in helpers.parallel_bulk(es, self.send_data, chunk_size=3500):
-        #print '\n', info, success
-        #print info, success
-        #print self.vari, success
-        if not success:
-          print('A document failed:', info)
-      self.data = {}
-      self.send_data = []
-      #loggerIndex.info('Bulk API request to Elasticsearch returned with code ' )
-    except Exception, e:
-      loggerIndex.error('Failed to send to Elasticsearch: %s' % e)
+  def PushMessage(self):
+    #try:
+    #r = requests.post('%s/_bulk?' % args.elasticserver, data=data, timeout=args.timeout)
+    #helpers.parallel_bulk(es, data, chunk_size=5)
+    self.queue.get()
+    #print threading.currentThread().getName(), self.queue.qsize()
+    print self.es
+    for success, info in helpers.parallel_bulk(self.es, self.send_data, chunk_size=4000, thread_count=4, request_timeout=30):
+      #print '\n', info, success
+      #print info, success
+      #print self.vari, success
+      if not success:
+        print('A document failed:', info)
+    self.data = {}
+    self.send_data = []
+    self.queue.task_done()
+    print 'batch done', self.queue.qsize()
+    #loggerIndex.info('Bulk API request to Elasticsearch returned with code ' )
+    #except Exception, e:
+    #  loggerIndex.error('Failed to send to Elasticsearch: %s' % e)
 
 class StreamConsumer():
   def __init__(self, connection, callback):
