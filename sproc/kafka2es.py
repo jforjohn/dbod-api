@@ -259,14 +259,18 @@ class MessageHandler():
           sflowSample.update({'sflow_src_location': {
                                 'lat': src_details.location.latitude,
                                 'lon': src_details.location.longitude
-                            }})
+                             },
+                             'sflow_src_country': src_details.country.name
+                            })
         if src_as:
           sflowSample.update({'sflow_src_as': src_as.autonomous_system_organization})
         if dst_details:
           sflowSample.update({'sflow_dst_location': {
                                'lat': dst_details.location.latitude,
                                'lon': dst_details.location.longitude
-                            }})
+                             },
+                             'sflow_dst_country': dst_details.country.name
+                            })
         if dst_as:
           sflowSample.update({'sflow_dst_as': dst_as.autonomous_system_organization})
 
