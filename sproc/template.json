@@ -22,6 +22,12 @@
         },
         "sflow_dstIP": {
           "type": "ip"
+        },
+        "sflow_src_location": {
+          "type": "geo_point"
+        },
+        "sflow_dst_location": {
+          "type": "geo_point"
         }
       }
     }
