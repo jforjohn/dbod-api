@@ -19,6 +19,7 @@ import time, datetime
 import ConfigParser
 from functools import partial
 from os import getpid
+import geoip2.database
 
 class Initialize:
   def SetupES(self, escluster):
@@ -122,6 +123,8 @@ class MessageHandler():
     self.queue = Queue()
     self.push = threading.Thread(target=self.PushMessage)
     self.no_threads = 0
+    self.geoip = geoip2.database.Reader('sproc/GeoLite2-City.mmdb')
+    self.ASip = geoip2.database.Reader('sproc/GeoLite2-ASN.mmdb')
 
   def Accept(self, body, message):
     try:
@@ -138,7 +141,7 @@ class MessageHandler():
       self.send_data = filter(None, self.send_data)
       if self.send_data:
         self.no_threads += 1
-        if self.no_threads < 5:
+        if self.no_threads < 7:
           self.push = threading.Thread(target=self.PushMessage)
           self.push.start()
           self.queue.put(1)
@@ -249,9 +252,45 @@ class MessageHandler():
       }
       if str(sflowSample.get(self.filter_params[0])) == self.filter_params[1]:
         [sflow_NEWsrcIP, sflow_NEWdstIP] = map(self.mapIP, [sflow_srcIP,sflow_dstIP])
+        [src_details, dst_details] = map(self.tryGeoIP, [sflow_srcIP,sflow_dstIP])
+        [src_as, dst_as] = map(self.tryASip, [sflow_srcIP,sflow_dstIP])
+        if src_details:
+          #[src_as, dst_as] = map(self.ASip, [sflow_srcIP,sflow_dstIP])
+          sflowSample.update({'sflow_src_location': {
+                                'lat': src_details.location.latitude,
+                                'lon': src_details.location.longitude
+                            }})
+        if src_as:
+          sflowSample.update({'sflow_src_as': src_as.autonomous_system_organization})
+        if dst_details:
+          sflowSample.update({'sflow_dst_location': {
+                               'lat': dst_details.location.latitude,
+                               'lon': dst_details.location.longitude
+                            }})
+        if dst_as:
+          sflowSample.update({'sflow_dst_as': dst_as.autonomous_system_organization})
+
         sflowSample.update({'sflow_NEWsrcIP': sflow_NEWsrcIP,
                             'sflow_NEWdstIP': sflow_NEWdstIP
                           })
+        #with geoip2.database.Reader'GeoLite2-City.mmdb') as geoip:
+        #  [src_contype, dst_contype] = map(geoip.connection_type, [sflow_srcIP,sflow_dstIP])
+        '''
+        sflowSample.update({'sflow_NEWsrcIP': sflow_NEWsrcIP,
+                            'sflow_NEWdstIP': sflow_NEWdstIP,
+                            'sflow_src_location': {
+                              'lat': src_details.location.latitude,
+                              'lon': src_details.location.longitude
+                            },
+                          #'sflow_dst_location': {
+                          #  'lat': dst_details.location.latitude,
+                          #  'lon': dst_details.location.longitude
+                          #}
+                          #'sflow_src_as': src_as.autonomous_system_organization,
+                          #'sflow_dst_as': dst_as.autonomous_system_organization
+                        })
+
+        '''
         datestr  = time.strftime('%Y.%m.%d')
         indexstr = '%s-%s' % ('sflow', datestr)
         #self.Encapsulate(sflowSample)
@@ -270,6 +309,19 @@ class MessageHandler():
       pass
 
     #return sflowSample
+
+  def tryASip(self, param):
+    try:
+      details = self.ASip.asn(param)
+      return details
+    except geoip2.errors.AddressNotFoundError:
+      return None
+  def tryGeoIP(self,param):
+    try:
+      details = self.geoip.city(param)
+      return details
+    except geoip2.errors.AddressNotFoundError:
+      return None
 
   def mapIP(self,param):
     try:
