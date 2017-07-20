@@ -101,6 +101,32 @@ class MonConfig(Initialize):
       filterParams.append((cluster_params[0], cluster_params[1]))
     return filterParams
 
+class myThread(threading.Thread):
+  def __init__(self, queue, name, es):
+    threading.Thread.__init__(self)
+    self.queue = queue
+    self.name = name
+    self.es = es
+
+  def run(self):
+    while True:
+      #try:
+      #r = requests.post('%s/_bulk?' % args.elasticserver, data=data, timeout=args.timeout)
+      #helpers.parallel_bulk(es, data, chunk_size=5)
+      send_data = self.queue.get()
+      #print threading.currentThread().getName(), self.queue.qsize()
+      print self.es
+      for success, info in helpers.parallel_bulk(self.es, send_data, chunk_size=4000, thread_count=4, request_timeout=30):
+        #print '\n', info, success
+        #print info, success
+        #print self.vari, success
+        if not success:
+          print('A document failed:', info)
+      #self.data = {}
+      #self.send_data = []
+      self.queue.task_done()
+      print 'batch done', self.queue.qsize(), self.queue.empty()
+
 
 
 class MessageHandler():
@@ -120,8 +146,15 @@ class MessageHandler():
     self.send_data = list()
     self.es = es
     self.filter_params = filter_params
+
     self.queue = Queue()
-    self.push = threading.Thread(target=self.PushMessage)
+    self.no_threads = 0
+    self.batch = 10000
+    self.batch_parts = 4
+    for i in range(self.batch_parts+1):
+      self.push = myThread(self.queue, 'ThreadNo'+str(i), es)
+      self.push.setDaemon(True)
+      self.push.start()
     self.no_threads = 0
     self.geoip = geoip2.database.Reader('sproc/GeoLite2-City.mmdb')
     self.ASip = geoip2.database.Reader('sproc/GeoLite2-ASN.mmdb')
@@ -136,21 +169,27 @@ class MessageHandler():
     #self.Encapsulate()
     #print len(self.send_data)
 
-    if len(self.send_data) >= 5000:
+    if len(self.send_data) >= self.batch+1:
       #topic = message.topic
-      self.send_data = filter(None, self.send_data)
-      if self.send_data:
-        self.no_threads += 1
-        if self.no_threads < 7:
-          self.push = threading.Thread(target=self.PushMessage)
-          self.push.start()
-          self.queue.put(1)
+      send_data = filter(None, self.send_data)
+      self.send_data = []
+      if send_data:
+        #self.no_threads += 1
+        if self.queue.qsize() < self.batch_parts+1:
+          #self.push = threading.Thread(target=self.PushMessage)
+          #self.push.start()
+          batch_step = self.batch/self.batch_parts
+          self.queue.put(send_data[:batch_step])
+          for i in range(1,self.batch_parts):
+            self.queue.put(send_data[batch_step*i:batch_step*i+batch_step])
         else:
-          self.no_threads = 0
+          print 'FULL', self.queue.qsize()
+          #self.no_threads = 0
           self.queue.join()
-          self.push = threading.Thread(target=self.PushMessage)
-          self.push.start()
-          self.queue.put(1)
+          #self.push = threading.Thread(target=self.PushMessage)
+          #self.push.start()
+          self.queue.put(send_data)
+
         '''
         print 'edo ', self.queue.qsize()
         if self.queue.qsize() < self.no_threads:
@@ -252,6 +291,7 @@ class MessageHandler():
       }
       if str(sflowSample.get(self.filter_params[0])) == self.filter_params[1]:
         [sflow_NEWsrcIP, sflow_NEWdstIP] = map(self.mapIP, [sflow_srcIP,sflow_dstIP])
+        '''
         [src_details, dst_details] = map(self.tryGeoIP, [sflow_srcIP,sflow_dstIP])
         [src_as, dst_as] = map(self.tryASip, [sflow_srcIP,sflow_dstIP])
         if src_details:
@@ -273,7 +313,7 @@ class MessageHandler():
                             })
         if dst_as:
           sflowSample.update({'sflow_dst_as': dst_as.autonomous_system_organization})
-
+        '''
         sflowSample.update({'sflow_NEWsrcIP': sflow_NEWsrcIP,
                             'sflow_NEWdstIP': sflow_NEWdstIP
                           })
@@ -354,25 +394,28 @@ class MessageHandler():
     #return send_data
 
   def PushMessage(self):
-    #try:
-    #r = requests.post('%s/_bulk?' % args.elasticserver, data=data, timeout=args.timeout)
-    #helpers.parallel_bulk(es, data, chunk_size=5)
-    self.queue.get()
-    #print threading.currentThread().getName(), self.queue.qsize()
-    print self.es
-    for success, info in helpers.parallel_bulk(self.es, self.send_data, chunk_size=4000, thread_count=4, request_timeout=30):
-      #print '\n', info, success
-      #print info, success
-      #print self.vari, success
-      if not success:
-        print('A document failed:', info)
-    self.data = {}
-    self.send_data = []
-    self.queue.task_done()
-    print 'batch done', self.queue.qsize()
-    #loggerIndex.info('Bulk API request to Elasticsearch returned with code ' )
-    #except Exception, e:
-    #  loggerIndex.error('Failed to send to Elasticsearch: %s' % e)
+    while True:
+      #try:
+      #r = requests.post('%s/_bulk?' % args.elasticserver, data=data, timeout=args.timeout)
+      #helpers.parallel_bulk(es, data, chunk_size=5)
+      send_data = self.queue.get()
+      #print threading.currentThread().getName(), self.queue.qsize()
+      print self.es
+      '''
+      for success, info in helpers.parallel_bulk(self.es, send_data, chunk_size=4000, thread_count=4, request_timeout=30):
+        #print '\n', info, success
+        #print info, success
+        #print self.vari, success
+        if not success:
+          print('A document failed:', info)
+      self.data = {}
+      #self.send_data = []
+      '''
+      self.queue.task_done()
+      print 'batch done', self.queue.qsize(), self.queue.empty()
+      #loggerIndex.info('Bulk API request to Elasticsearch returned with code ' )
+      #except Exception, e:
+      #  loggerIndex.error('Failed to send to Elasticsearch: %s' % e)
 
 class StreamConsumer():
   def __init__(self, connection, callback):
