@@ -1,5 +1,5 @@
 #!/usr/bin/python
-import multiprocessing as mp
+import multiprocess as mp
 import threading
 from Queue import Queue
 from kafka import KafkaConsumer
@@ -35,12 +35,12 @@ class Initialize:
     except Exception, e:
       loggerConsumer.error("During Elasticsearch cluster instantiation: %s" %e)
 
-  def SetupConsumer(self):
+  def SetupConsumer(self, groupId):
     # To consume latest messages and auto-commit offsets
-    loggerConsumer.info('Consumer starts')
+    loggerConsumer.info('Consumer group %s starts' %(groupId))
     try:
       myConsumer = KafkaConsumer('sflow2',
-                              group_id='sflow-myConsumerz',
+                              group_id=groupId,
                               bootstrap_servers=['smonnet-brpr1.cern.ch:9092','smonnet-brpr2.cern.ch:9092'],
                               max_partition_fetch_bytes=200000,
                               partition_assignment_strategy=[RoundRobinPartitionAssignor])
@@ -77,7 +77,8 @@ class MonConfig(Initialize):
     for ports in services_ports:
       service_ports = ports.split(',')
       escluster = self.EScluster(service_ports, monitor_nodes)
-      mon_instance = Initialize.SetupES(self, escluster)
+      mon_instance_init = Initialize()
+      mon_instance = mon_instance_init.SetupES(escluster)
       esConnections.append(mon_instance)
     return esConnections
 
@@ -460,6 +461,7 @@ def closeConsumer(connection, *args):
   loggerConsumer.info('Signal handler called with signal: %s' %(args))
   # restore the original signal handler as otherwise evil things will happen
   # in raw_input when CTRL+C is pressed, and our signal handler is not re-entrant
+  original_sigint = signal.getsignal(signal.SIGINT)
   signal.signal(signal.SIGINT, original_sigint)
   self.connection.close()
   try:
@@ -467,9 +469,14 @@ def closeConsumer(connection, *args):
   except KeyboardInterrupt:
     sys.exit(1)
 
-def start(kafkaConnection, esConnections, filterParams):
+def start(init_set, esConnections, filterParams, groupId):
+  kafkaConnection = init_set.SetupConsumer(groupId)
+  original_sigint = signal.getsignal(signal.SIGINT)
+  signal.signal(signal.SIGHUP, partial(newMonitor, kafkaConnection))
+  signal.signal(signal.SIGINT, partial(closeConsumer, kafkaConnection))
   handler = MessageHandler(esConnections, filterParams)
   consumer = StreamConsumer(kafkaConnection, handler.Accept)
+  original_sigint = signal.getsignal(signal.SIGINT)
   consumer.runConsumer()
 
 if __name__ == '__main__':
@@ -517,19 +524,21 @@ if __name__ == '__main__':
   loggerIndex.info("Filter in params: %s" %(filterParams))
 
   init_set = Initialize()
-  kafkaConnection = init_set.SetupConsumer()
+  monitor_names = config.get('smonit', 'monitor_names').split('-')
+  #kafkaConnection = init_set.SetupConsumer()
 
   original_sigint = signal.getsignal(signal.SIGINT)
-  signal.signal(signal.SIGHUP, partial(newMonitor, kafkaConnection))
+  #signal.signal(signal.SIGHUP, partial(newMonitor, kafkaConnection))
   #signal.signal(signal.SIGINT, partial(closeConsumer, kafkaConnection))
   #start(kafkaConnection, esConnections, filterParams)
   processes =  [mp.Process(target=start,
-                args=(kafkaConnection,esConnections[i],filterParams[i]))
+                args=(init_set,esConnections[i],filterParams[i], monitor_names[i]))
                 for i in range(len(esConnections))]
+  loggerIndex.info("Processes: %s" %(processes))
   for p in processes:
     #p.daemon = True
     p.start()
-  signal.signal(signal.SIGINT, partial(closeConsumer, kafkaConnection))
+  #signal.signal(signal.SIGINT, partial(closeConsumer, kafkaConnection))
   #handler = MessageHandler(esConnections, filterParams)
   #consumer = StreamConsumer(kafkaConnection, handler.Accept)
   #consumer.runConsumer()
