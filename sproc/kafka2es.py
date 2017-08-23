@@ -12,6 +12,7 @@ import signal
 import socket
 import sys
 import json
+import cjson
 import yaml
 from yaml import load
 from yaml import CLoader as Loader
@@ -152,7 +153,7 @@ class MessageHandler():
     self.no_threads = 0
     self.batch = 10000
     self.batch_parts = 4
-    for i in range(self.batch_parts+1):
+    for i in range(self.batch_parts):
       self.push = myThread(self.queue, 'ThreadNo'+str(i), es)
       self.push.setDaemon(True)
       self.push.start()
@@ -170,18 +171,18 @@ class MessageHandler():
     #self.Encapsulate()
     #print len(self.send_data)
 
-    if len(self.send_data) >= self.batch+1:
+    if len(self.send_data) >= self.batch:
       #topic = message.topic
       send_data = filter(None, self.send_data)
       self.send_data = []
       if send_data:
         #self.no_threads += 1
-        if self.queue.qsize() < self.batch_parts+1:
+        if self.queue.qsize() < self.batch_parts+4:
           #self.push = threading.Thread(target=self.PushMessage)
           #self.push.start()
           batch_step = self.batch/self.batch_parts
-          self.queue.put(send_data[:batch_step])
-          for i in range(1,self.batch_parts):
+          #self.queue.put(send_data[:batch_step])
+          for i in range(self.batch_parts):
             self.queue.put(send_data[batch_step*i:batch_step*i+batch_step])
         else:
           print 'FULL', self.queue.qsize()
@@ -436,9 +437,10 @@ class StreamConsumer():
     except Exception, e:
       loggerConsumer.error("During messages parsing exception: %s" %e)
 
-def newMonitor(kafkaConnection, *args):
+def newMonitor(kafkaConnections, *args):
   config.read(config_file)
   mon_config = MonConfig()
+  initSet = Initialize()
   new_config = config.get('smonit', 'new_monitor').split(',')
   loggerIndex.info("New config arrived: %s" %(new_config))
   '''
@@ -448,41 +450,45 @@ def newMonitor(kafkaConnection, *args):
   else:
   '''
   new_filterParams = (new_config[1], new_config[2])
+  grouId = new_config[3]
+  connect2kafka = kafkaConnections.get(groupId)
+  if not connect2kafka:
+    connect2kafka = initSet.SetupConsumer(groupId)
+    kafkaConnections.update({groupId: connect2kafka})
   monitor_nodes = config.get('smonit', 'monitor_nodes').split(',')
-  new_ports = new_config[3:]
+  new_ports = new_config[4:]
   new_cluster = mon_config.EScluster(new_ports, monitor_nodes)
-  new_esConnection = mon_config.SetupES(new_cluster)
-  p = mp.Process(target=start, args=(kafkaConnection,new_esConnection,new_filterParams))
+  new_esConnection = initSet.SetupES(new_cluster)
+  p = mp.Process(target=start, args=(connect2kafka,new_esConnection,new_filterParams))
   p.start()
   print args
 
 
-def closeConsumer(connection, *args):
-  loggerConsumer.info('Signal handler called with signal: %s' %(args))
+def closeConsumer(connections, *args):
+  loggerConsumer.info("Signal handler called with signal SIGINT")
   # restore the original signal handler as otherwise evil things will happen
   # in raw_input when CTRL+C is pressed, and our signal handler is not re-entrant
   original_sigint = signal.getsignal(signal.SIGINT)
   signal.signal(signal.SIGINT, original_sigint)
-  self.connection.close()
+  print connections
+  for con in connections.values():
+    con.close
   try:
     sys.exit(0)
   except KeyboardInterrupt:
     sys.exit(1)
 
-def start(init_set, esConnections, filterParams, groupId):
-  kafkaConnection = init_set.SetupConsumer(groupId)
-  original_sigint = signal.getsignal(signal.SIGINT)
-  signal.signal(signal.SIGHUP, partial(newMonitor, kafkaConnection))
-  signal.signal(signal.SIGINT, partial(closeConsumer, kafkaConnection))
+def start(connect2kafka, esConnections, filterParams, groupId):
   handler = MessageHandler(esConnections, filterParams)
-  consumer = StreamConsumer(kafkaConnection, handler.Accept)
-  original_sigint = signal.getsignal(signal.SIGINT)
+  consumer = StreamConsumer(connect2kafka, handler.Accept)
   consumer.runConsumer()
 
 if __name__ == '__main__':
   global loggerConsumer
   global loggerIndex
   global test
+  #global kafkaConnections
+  kafkaConnections = {}
   #pr_queue = mp.Queue()
 
   config = ConfigParser.ConfigParser()
@@ -495,7 +501,8 @@ if __name__ == '__main__':
 
   # create logger
   with open("sproc/jsonIPmap.json", 'r') as fd:
-    test = json.load(fd)
+    #test = json.load(fd)
+    test = cjson.decode(fd.read())
     #test = yaml.load(fd, Loader=Loader)
 
   loggerConsumer = logging.getLogger('kafka consumer')
@@ -523,21 +530,27 @@ if __name__ == '__main__':
   loggerIndex.info("Initialization: es connections: %s" %(esConnections))
   loggerIndex.info("Filter in params: %s" %(filterParams))
 
-  init_set = Initialize()
+  initSet = Initialize()
   monitor_names = config.get('smonit', 'monitor_names').split('-')
   #kafkaConnection = init_set.SetupConsumer()
+  for groupId in set(monitor_names):
+    kafkaConnections.update({groupId: initSet.SetupConsumer(groupId)})
 
-  original_sigint = signal.getsignal(signal.SIGINT)
   #signal.signal(signal.SIGHUP, partial(newMonitor, kafkaConnection))
   #signal.signal(signal.SIGINT, partial(closeConsumer, kafkaConnection))
   #start(kafkaConnection, esConnections, filterParams)
   processes =  [mp.Process(target=start,
-                args=(init_set,esConnections[i],filterParams[i], monitor_names[i]))
+                args=(kafkaConnections.get(monitor_names[i]),esConnections[i],filterParams[i], monitor_names[i]))
                 for i in range(len(esConnections))]
   loggerIndex.info("Processes: %s" %(processes))
+  signal.signal(signal.SIGHUP, partial(newMonitor, kafkaConnections))
+  signal.signal(signal.SIGINT, partial(closeConsumer, kafkaConnections))
+
   for p in processes:
-    #p.daemon = True
+    p.daemon = True
     p.start()
+  for p in processes:
+    p.join()
   #signal.signal(signal.SIGINT, partial(closeConsumer, kafkaConnection))
   #handler = MessageHandler(esConnections, filterParams)
   #consumer = StreamConsumer(kafkaConnection, handler.Accept)
