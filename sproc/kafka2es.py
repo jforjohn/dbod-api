@@ -21,6 +21,7 @@ import ConfigParser
 from functools import partial
 from os import getpid
 import geoip2.database
+import psutil
 
 class Initialize:
   def SetupES(self, escluster):
@@ -69,17 +70,22 @@ class MonConfig(Initialize):
 
   def ClusterConnections(self):
     esConnections = []
+    '''
     monitor_nodes = config.get('smonit','monitor_nodes').split(',')
     services_ports_str = config.get('smonit','services_ports')
     if services_ports_str:
       services_ports = services_ports_str.split('-')
     else:
       services_ports = []
-    for ports in services_ports:
-      service_ports = ports.split(',')
-      escluster = self.EScluster(service_ports, monitor_nodes)
+    '''
+    monitor_nodes = config.get('smonit','monitor_nodes').split('--')
+    for node in monitor_nodes:
+      instance_node = node.split(',')
+      #instance_hosts = [host.split(':')[0] for host in instance_nodes]
+      #instance_ports = [host.split(':')[1] for host in instance_nodes]
+      #escluster = self.EScluster(service_ports, monitor_nodes)
       mon_instance_init = Initialize()
-      mon_instance = mon_instance_init.SetupES(escluster)
+      mon_instance = mon_instance_init.SetupES(instance_node)
       esConnections.append(mon_instance)
     return esConnections
 
@@ -104,14 +110,18 @@ class MonConfig(Initialize):
     return filterParams
 
 class myThread(threading.Thread):
-  def __init__(self, queue, name, es):
+  def __init__(self, queue, name, es, affinity):
     threading.Thread.__init__(self)
     self.queue = queue
     self.name = name
     self.es = es
+    self.affinity = affinity
 
   def run(self):
+    #proc = psutil.Process()
+    #proc.cpu_affinity([self.affinity])
     while True:
+
       #try:
       #r = requests.post('%s/_bulk?' % args.elasticserver, data=data, timeout=args.timeout)
       #helpers.parallel_bulk(es, data, chunk_size=5)
@@ -153,8 +163,9 @@ class MessageHandler():
     self.no_threads = 0
     self.batch = 10000
     self.batch_parts = 4
+    no_cores = psutil.cpu_count()
     for i in range(self.batch_parts):
-      self.push = myThread(self.queue, 'ThreadNo'+str(i), es)
+      self.push = myThread(self.queue, 'ThreadNo'+str(i), es, i%no_cores)
       self.push.setDaemon(True)
       self.push.start()
     self.no_threads = 0
@@ -176,8 +187,9 @@ class MessageHandler():
       send_data = filter(None, self.send_data)
       self.send_data = []
       if send_data:
+        qs = self.queue.qsize()
         #self.no_threads += 1
-        if self.queue.qsize() < self.batch_parts+4:
+        if qs < self.batch_parts:
           #self.push = threading.Thread(target=self.PushMessage)
           #self.push.start()
           batch_step = self.batch/self.batch_parts
@@ -185,9 +197,14 @@ class MessageHandler():
           for i in range(self.batch_parts):
             self.queue.put(send_data[batch_step*i:batch_step*i+batch_step])
         else:
-          print 'FULL', self.queue.qsize()
+          print 'FULL', self.queue.qsize(), qs
           #self.no_threads = 0
-          self.queue.join()
+          if qs % 2 == 0:
+            joinThread = threading.Thread(target=self.queue.join)
+            joinThread.start()
+          else:
+            self.queue.join()
+          #self.queue.join()
           #self.push = threading.Thread(target=self.PushMessage)
           #self.push.start()
           self.queue.put(send_data)
@@ -293,9 +310,8 @@ class MessageHandler():
       }
       if str(sflowSample.get(self.filter_params[0])) == self.filter_params[1]:
         [sflow_NEWsrcIP, sflow_NEWdstIP] = map(self.mapIP, [sflow_srcIP,sflow_dstIP])
-        '''
         [src_details, dst_details] = map(self.tryGeoIP, [sflow_srcIP,sflow_dstIP])
-        [src_as, dst_as] = map(self.tryASip, [sflow_srcIP,sflow_dstIP])
+        #[src_as, dst_as] = map(self.tryASip, [sflow_srcIP,sflow_dstIP])
         if src_details:
           #[src_as, dst_as] = map(self.ASip, [sflow_srcIP,sflow_dstIP])
           sflowSample.update({'sflow_src_location': {
@@ -304,8 +320,10 @@ class MessageHandler():
                              },
                              'sflow_src_country': src_details.country.name
                             })
-        if src_as:
-          sflowSample.update({'sflow_src_as': src_as.autonomous_system_organization})
+
+        #if src_as:
+        #  sflowSample.update({'sflow_src_as': src_as.autonomous_system_organization})
+
         if dst_details:
           sflowSample.update({'sflow_dst_location': {
                                'lat': dst_details.location.latitude,
@@ -313,9 +331,8 @@ class MessageHandler():
                              },
                              'sflow_dst_country': dst_details.country.name
                             })
-        if dst_as:
-          sflowSample.update({'sflow_dst_as': dst_as.autonomous_system_organization})
-        '''
+        #if dst_as:
+        #  sflowSample.update({'sflow_dst_as': dst_as.autonomous_system_organization})
         sflowSample.update({'sflow_NEWsrcIP': sflow_NEWsrcIP,
                             'sflow_NEWdstIP': sflow_NEWdstIP
                           })
@@ -335,7 +352,6 @@ class MessageHandler():
                           #'sflow_src_as': src_as.autonomous_system_organization,
                           #'sflow_dst_as': dst_as.autonomous_system_organization
                         })
-
         '''
         datestr  = time.strftime('%Y.%m.%d')
         indexstr = '%s-%s' % ('sflow', datestr)
@@ -439,7 +455,7 @@ class StreamConsumer():
 
 def newMonitor(kafkaConnections, *args):
   config.read(config_file)
-  mon_config = MonConfig()
+  #mon_config = MonConfig()
   initSet = Initialize()
   new_config = config.get('smonit', 'new_monitor').split(',')
   loggerIndex.info("New config arrived: %s" %(new_config))
@@ -456,10 +472,10 @@ def newMonitor(kafkaConnections, *args):
     connect2kafka = initSet.SetupConsumer(groupId)
     kafkaConnections.update({groupId: connect2kafka})
   monitor_nodes = config.get('smonit', 'monitor_nodes').split(',')
-  new_ports = new_config[4:]
-  new_cluster = mon_config.EScluster(new_ports, monitor_nodes)
+  new_cluster = new_config[4:]
+  #new_cluster = mon_config.EScluster(new_ports, monitor_nodes)
   new_esConnection = initSet.SetupES(new_cluster)
-  p = mp.Process(target=start, args=(connect2kafka,new_esConnection,new_filterParams))
+  p = mp.Process(target=start, args=(connect2kafka,new_esConnection,new_filterParams,3))
   p.start()
   print args
 
@@ -478,7 +494,9 @@ def closeConsumer(connections, *args):
   except KeyboardInterrupt:
     sys.exit(1)
 
-def start(connect2kafka, esConnections, filterParams, groupId):
+def start(connect2kafka, esConnections, filterParams, affinity):
+  proc = psutil.Process()
+  proc.cpu_affinity([affinity])
   handler = MessageHandler(esConnections, filterParams)
   consumer = StreamConsumer(connect2kafka, handler.Accept)
   consumer.runConsumer()
@@ -533,6 +551,7 @@ if __name__ == '__main__':
   initSet = Initialize()
   monitor_names = config.get('smonit', 'monitor_names').split('-')
   #kafkaConnection = init_set.SetupConsumer()
+  no_cores = psutil.cpu_count()
   for groupId in set(monitor_names):
     kafkaConnections.update({groupId: initSet.SetupConsumer(groupId)})
 
@@ -540,7 +559,7 @@ if __name__ == '__main__':
   #signal.signal(signal.SIGINT, partial(closeConsumer, kafkaConnection))
   #start(kafkaConnection, esConnections, filterParams)
   processes =  [mp.Process(target=start,
-                args=(kafkaConnections.get(monitor_names[i]),esConnections[i],filterParams[i], monitor_names[i]))
+                args=(kafkaConnections.get(monitor_names[i]),esConnections[i],filterParams[i],i%no_cores))
                 for i in range(len(esConnections))]
   loggerIndex.info("Processes: %s" %(processes))
   signal.signal(signal.SIGHUP, partial(newMonitor, kafkaConnections))
